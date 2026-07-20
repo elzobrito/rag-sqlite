@@ -1,0 +1,3 @@
+Data Mesh is an architectural paradigm that organizes data around business domains.
+Domain teams own data products and are responsible for quality and discoverability.
+Platform teams provide self-serve infrastructure for mesh nodes.

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Local RAG databases (may contain private corpora)
+*.sqlite
+*.sqlite3
+*.db
+kb.sqlite
+
+# ESAA local event store / projections (operator workspace state)
+.roadmap/activity.jsonl
+.roadmap/activity.jsonl.lock
+.roadmap/issues.json
+.roadmap/lessons.json
+.roadmap/roadmap.json
+.roadmap/backups/
+.roadmap/artifacts/
+.roadmap/snapshots/
+.roadmap/inbox/
+.roadmap/run/
+.roadmap/file_updates_*.json
+.roadmap/plugins.lock.json
+.roadmap/roadmaps.lock.json
+.roadmap/sync-state.json
+
+# Editor / agent local
+.claude/
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
