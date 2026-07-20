@@ -1,0 +1,3 @@
+# Optional but recommended for KNN vector search inside SQLite.
+# Without it, rag_sqlite falls back to pure-Python cosine scan (vector_backend=auto).
+sqlite-vec>=0.1.6,<0.2

@@ -217,6 +217,8 @@ Não exige DB. Devolve JSON Schema de argumentos/saídas para tool-calling.
 | `context_max_chars` | int | 50000 | Truncate context |
 | `max_chunks_per_doc` | int | 500 | Cap de chunks |
 | `health_probe_embed` | bool | false | Probe `/api/embed` |
+| `vector_backend` | str | auto | `auto` \| `sqlite-vec` \| `python` |
+| `vec_candidate_multiplier` | int | 4 | KNN oversample antes do hybrid |
 
 ## Exit codes
 

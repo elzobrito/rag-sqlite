@@ -9,12 +9,15 @@ comandos na ordem real de uso, flags globais e o que esperar na saída.
 ## 1. Pré-requisitos
 
 - Python **3.10+**
-- Nenhuma dependência pip obrigatória (stdlib)
+- Stdlib suficiente para o path `vector_backend=python`
+- **Recomendado:** `pip install -r requirements.txt` (instala [sqlite-vec](https://github.com/asg017/sqlite-vec) para KNN nativo)
 - Opcional: [Ollama](https://ollama.com) se for usar embeddings semânticos
 
 ```bash
 cd /home/elzobrito/desenvolvimento/rag-sqlite
 python --version
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ## 2. Flags globais

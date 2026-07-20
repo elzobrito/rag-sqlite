@@ -3,7 +3,8 @@
 
 LLM-oriented: one JSON object on stdout per invocation (including usage errors).
 Config lives in SQLite. Full plan features: fingerprint, generations, migrations,
-security roots/hosts, limits, float32 BLOB, SAVEPOINT index, health states, JSON Schema.
+security roots/hosts, limits, float32 BLOB, SAVEPOINT index, health states, JSON Schema,
+optional sqlite-vec KNN backend with Python hybrid fallback.
 """
 
 from __future__ import annotations
@@ -60,6 +61,16 @@ DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
     "context_max_chars": {"value": "50000", "value_type": "int", "description": "Truncate context field to this many chars"},
     "max_chunks_per_doc": {"value": "500", "value_type": "int", "description": "Max chunks retained per document"},
     "health_probe_embed": {"value": "false", "value_type": "bool", "description": "If true, health posts a tiny embed probe"},
+    "vector_backend": {
+        "value": "auto",
+        "value_type": "str",
+        "description": "Vector search backend: auto | sqlite-vec | python",
+    },
+    "vec_candidate_multiplier": {
+        "value": "4",
+        "value_type": "int",
+        "description": "When using sqlite-vec, fetch k*multiplier candidates before hybrid re-rank",
+    },
 }
 
 
@@ -359,6 +370,176 @@ def pack_f32(vec: Sequence[float]) -> bytes:
     return struct.pack(f"{len(vec)}f", *[float(x) for x in vec])
 
 
+# Optional sqlite-vec (KNN). Falls back to pure-Python cosine when unavailable.
+_SQLITE_VEC_IMPORT_ERROR: str | None = None
+try:
+    import sqlite_vec  # type: ignore
+    from sqlite_vec import serialize_float32 as _serialize_float32  # type: ignore
+except Exception as _exc:  # noqa: BLE001
+    sqlite_vec = None  # type: ignore
+    _serialize_float32 = None  # type: ignore
+    _SQLITE_VEC_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+
+
+def sqlite_vec_importable() -> bool:
+    return sqlite_vec is not None
+
+
+def load_sqlite_vec(conn: sqlite3.Connection) -> tuple[bool, str | None]:
+    """Load sqlite-vec into *conn*. Returns (ok, detail)."""
+    if sqlite_vec is None:
+        return False, _SQLITE_VEC_IMPORT_ERROR or "sqlite-vec package not installed"
+    try:
+        conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            try:
+                conn.enable_load_extension(False)
+            except Exception:
+                pass
+        ver = conn.execute("SELECT vec_version()").fetchone()
+        return True, (ver[0] if ver else "loaded")
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def resolve_vector_backend(settings: dict[str, Any], vec_loaded: bool) -> str:
+    raw = str(settings.get("vector_backend") or "auto").strip().lower()
+    if raw in {"python", "bruteforce", "scan"}:
+        return "python"
+    if raw in {"sqlite-vec", "sqlite_vec", "vec"}:
+        if not vec_loaded:
+            raise CliError(
+                "vector_backend=sqlite-vec but sqlite-vec is not available "
+                f"({_SQLITE_VEC_IMPORT_ERROR or 'load failed'}). "
+                "Install with: pip install sqlite-vec  (or set vector_backend=auto|python)",
+                error_type="SqliteVecUnavailable",
+            )
+        return "sqlite-vec"
+    # auto
+    return "sqlite-vec" if vec_loaded else "python"
+
+
+def vec_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='chunk_vec'"
+    ).fetchone()
+    return row is not None
+
+
+def rebuild_chunk_vec(
+    conn: sqlite3.Connection,
+    *,
+    fingerprint: str,
+    generation_id: int,
+    dimensions: int,
+    vec_loaded: bool,
+) -> dict[str, Any]:
+    """Drop/recreate chunk_vec and fill from chunks for the active generation."""
+    if not vec_loaded or dimensions < 1:
+        return {"rebuilt": False, "reason": "vec_unavailable_or_dims", "count": 0}
+    conn.execute("DROP TABLE IF EXISTS chunk_vec")
+    # distance_metric=cosine: distance ≈ 1 - cosine_similarity for unit vectors
+    conn.execute(
+        f"CREATE VIRTUAL TABLE chunk_vec USING vec0("
+        f"embedding float[{int(dimensions)}] distance_metric=cosine"
+        f")"
+    )
+    rows = conn.execute(
+        """
+        SELECT id, embedding_blob, embedding_json, dimensions
+        FROM chunks
+        WHERE index_fingerprint = ? AND generation_id = ?
+        ORDER BY id
+        """,
+        (fingerprint, generation_id),
+    ).fetchall()
+    count = 0
+    for r in rows:
+        blob = r["embedding_blob"]
+        if blob is None and r["embedding_json"]:
+            vec = [float(x) for x in json.loads(r["embedding_json"])]
+            blob = pack_f32(vec)
+        if not blob:
+            continue
+        if int(r["dimensions"] or 0) != int(dimensions) and len(blob) // 4 != int(dimensions):
+            continue
+        conn.execute(
+            "INSERT INTO chunk_vec(rowid, embedding) VALUES (?, ?)",
+            (int(r["id"]), blob),
+        )
+        count += 1
+    _meta_set(conn, "chunk_vec_dims", str(dimensions))
+    _meta_set(conn, "chunk_vec_fingerprint", fingerprint)
+    _meta_set(conn, "chunk_vec_generation_id", str(generation_id))
+    return {"rebuilt": True, "count": count, "dimensions": dimensions}
+
+
+def knn_chunk_ids(
+    conn: sqlite3.Connection,
+    query_vector: Sequence[float],
+    *,
+    k: int,
+) -> list[tuple[int, float]]:
+    """Return [(chunk_id, cosine_distance), ...] via sqlite-vec. cosine_sim ≈ 1 - distance."""
+    if k < 1:
+        return []
+    if not vec_table_exists(conn):
+        return []
+    blob = pack_f32(query_vector)
+    # sqlite-vec KNN
+    # sqlite-vec allows only a single ORDER BY distance on KNN queries.
+    sql = (
+        "SELECT rowid, distance FROM chunk_vec "
+        "WHERE embedding MATCH ? AND k = ? "
+        "ORDER BY distance"
+    )
+    out: list[tuple[int, float]] = []
+    for row in conn.execute(sql, (blob, int(k))):
+        dist = float(row[1])
+        out.append((int(row[0]), dist))
+    # Stable secondary order for ties (deterministic hybrid re-rank).
+    out.sort(key=lambda t: (t[1], t[0]))
+    return out
+
+
+def load_chunk_rows_by_ids(
+    conn: sqlite3.Connection,
+    ids: Sequence[int],
+) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    sql = f"""
+        SELECT c.id, c.document_id, c.chunk_index, c.chunk_text, c.provider, c.model,
+               c.dimensions, c.embedding_json, c.embedding_blob, c.index_fingerprint, c.generation_id,
+               d.filename, d.source_path
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE c.id IN ({placeholders})
+    """
+    by_id: dict[int, dict[str, Any]] = {}
+    for r in conn.execute(sql, list(ids)):
+        by_id[int(r["id"])] = {
+            "id": int(r["id"]),
+            "document_id": int(r["document_id"]),
+            "chunk_index": int(r["chunk_index"]),
+            "chunk_text": r["chunk_text"] or "",
+            "provider": r["provider"],
+            "model": r["model"],
+            "dimensions": int(r["dimensions"]),
+            "embedding": unpack_embedding(r["embedding_blob"], r["embedding_json"]),
+            "filename": r["filename"],
+            "source_path": r["source_path"],
+            "index_fingerprint": r["index_fingerprint"],
+            "generation_id": r["generation_id"],
+        }
+    # preserve knn order
+    return [by_id[i] for i in ids if i in by_id]
+
+
+
 def unpack_embedding(blob: bytes | None, json_text: str | None) -> list[float]:
     if blob:
         n = len(blob) // 4
@@ -522,6 +703,8 @@ class OpenResult:
     path: Path
     created: bool
     migrated: bool
+    vec_available: bool = False
+    vec_detail: str | None = None
 
 
 def ensure_db(db_path: Path, *, create: bool = True) -> OpenResult:
@@ -540,8 +723,16 @@ def ensure_db(db_path: Path, *, create: bool = True) -> OpenResult:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode = WAL")
+    vec_ok, vec_detail = load_sqlite_vec(conn)
     migrated = _apply_schema_and_migrate(conn)
-    return OpenResult(conn=conn, path=db_path, created=created, migrated=migrated)
+    return OpenResult(
+        conn=conn,
+        path=db_path,
+        created=created,
+        migrated=migrated,
+        vec_available=vec_ok,
+        vec_detail=vec_detail,
+    )
 
 
 def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
@@ -784,6 +975,15 @@ def validate_setting(key: str, value: Any) -> None:
         normalize_base_url(str(value))
     if key == "index_root" and str(value).strip():
         Path(str(value)).expanduser()
+    if key == "vector_backend":
+        v = str(value).strip().lower()
+        if v not in {"auto", "sqlite-vec", "sqlite_vec", "python", "bruteforce", "scan", "vec"}:
+            raise CliError(
+                "vector_backend must be auto|sqlite-vec|python",
+                error_type="ConfigError",
+            )
+    if key == "vec_candidate_multiplier" and int(value) < 1:
+        raise CliError("vec_candidate_multiplier must be >= 1", error_type="ConfigError")
 
 
 def prepare_setting(conn: sqlite3.Connection, key: str, raw_value: str) -> tuple[str, Any, str, str]:
@@ -869,7 +1069,13 @@ def begin_generation(conn: sqlite3.Connection, fingerprint: str, notes: str = ""
     return int(cur.lastrowid)
 
 
-def activate_generation(conn: sqlite3.Connection, gen_id: int, fingerprint: str) -> None:
+def activate_generation(
+    conn: sqlite3.Connection,
+    gen_id: int,
+    fingerprint: str,
+    *,
+    vec_loaded: bool = False,
+) -> None:
     now = utc_now_iso()
     conn.execute(
         "UPDATE index_generations SET status='abandoned' WHERE fingerprint=? AND status='active' AND id!=?",
@@ -884,6 +1090,23 @@ def activate_generation(conn: sqlite3.Connection, gen_id: int, fingerprint: str)
         "DELETE FROM chunks WHERE index_fingerprint=? AND generation_id!=?",
         (fingerprint, gen_id),
     )
+    # Rebuild sqlite-vec index for the newly active generation
+    row = conn.execute(
+        """
+        SELECT dimensions FROM chunks
+        WHERE index_fingerprint=? AND generation_id=?
+        ORDER BY id LIMIT 1
+        """,
+        (fingerprint, gen_id),
+    ).fetchone()
+    if row and vec_loaded:
+        rebuild_chunk_vec(
+            conn,
+            fingerprint=fingerprint,
+            generation_id=gen_id,
+            dimensions=int(row["dimensions"]),
+            vec_loaded=vec_loaded,
+        )
 
 
 def active_generation_id(conn: sqlite3.Connection, fingerprint: str) -> int | None:
@@ -1325,10 +1548,28 @@ def _index_paths(
             conn.commit()
             activated = False
         else:
-            activate_generation(conn, gen_id, fingerprint)
+            activate_generation(conn, gen_id, fingerprint, vec_loaded=opened.vec_available)
             conn.commit()
             activated = True
     else:
+        # Incremental update on active generation: rebuild vec so KNN stays current
+        if opened.vec_available:
+            row = conn.execute(
+                """
+                SELECT dimensions FROM chunks
+                WHERE index_fingerprint=? AND generation_id=?
+                ORDER BY id LIMIT 1
+                """,
+                (fingerprint, gen_id),
+            ).fetchone()
+            if row:
+                rebuild_chunk_vec(
+                    conn,
+                    fingerprint=fingerprint,
+                    generation_id=gen_id,
+                    dimensions=int(row["dimensions"]),
+                    vec_loaded=True,
+                )
         conn.commit()
         activated = True
     totals = {
@@ -1511,28 +1752,125 @@ def cmd_query(
     exp = int(expand_n if expand_n is not None else settings["expand_neighbors"])
     qvec = embed_fn([query])[0]
     dims = validate_vectors([list(qvec)], 1)
-    if gen_id >= 0:
-        rows = load_chunk_rows(
-            conn,
-            fingerprint=fingerprint,
-            generation_id=gen_id,
-            doc_filter=doc_filter,
-            path_filter=path_filter,
+    backend = resolve_vector_backend(settings, opened.vec_available)
+    rows: list[dict[str, Any]] = []
+    knn_meta: dict[str, Any] = {"used": False}
+
+    if gen_id >= 0 and backend == "sqlite-vec" and vec_table_exists(conn):
+        mult = max(1, int(settings.get("vec_candidate_multiplier") or 4))
+        knn_k = max(tk, min(tk * mult, max_top * mult, 200))
+        # Ensure dims match stored vec index
+        stored_dims = _meta_get(conn, "chunk_vec_dims")
+        if stored_dims and int(stored_dims) != dims:
+            rebuild_chunk_vec(
+                conn,
+                fingerprint=fingerprint,
+                generation_id=gen_id,
+                dimensions=dims,
+                vec_loaded=opened.vec_available,
+            )
+            conn.commit()
+        knn = knn_chunk_ids(conn, qvec, k=knn_k)
+        knn_meta = {
+            "used": True,
+            "k_requested": knn_k,
+            "k_returned": len(knn),
+            "distance_metric": "cosine",
+        }
+        if knn:
+            # Pre-fill cosine from vec distance (1 - distance)
+            id_to_cos = {
+                cid: round_score(1.0 - dist, decimals) for cid, dist in knn
+            }
+            rows = load_chunk_rows_by_ids(conn, [cid for cid, _ in knn])
+            # optional post-filter by doc/path
+            if doc_filter or path_filter:
+                filtered = []
+                for r in rows:
+                    if doc_filter:
+                        if doc_filter.isdigit():
+                            if int(r["document_id"]) != int(doc_filter):
+                                continue
+                        elif doc_filter.lower() not in (r.get("filename") or "").lower():
+                            continue
+                    if path_filter and path_filter not in (r.get("source_path") or ""):
+                        continue
+                    filtered.append(r)
+                rows = filtered
+            # inject embedding for hybrid if empty? already loaded
+            # override retrieve cosine by using embeddings; also store knn cosine
+            for r in rows:
+                if not r.get("embedding"):
+                    # reconstruct unit vector not available; keep stored
+                    pass
+            hits = retrieve(
+                query=query,
+                query_vector=qvec,
+                rows=rows,
+                top_k=tk,
+                min_score=ms,
+                hybrid_alpha=alpha,
+                min_score_relative=min_score_relative,
+                decimals=decimals,
+            )
+            # Prefer sqlite-vec cosine when hybrid needs it and embedding missing edge cases
+            for h in hits:
+                cid = int(h["chunk_id"])
+                if cid in id_to_cos and (not h.get("cosine")):
+                    h["cosine"] = id_to_cos[cid]
+        else:
+            rows = []
+            hits = []
+    else:
+        if gen_id >= 0:
+            rows = load_chunk_rows(
+                conn,
+                fingerprint=fingerprint,
+                generation_id=gen_id,
+                doc_filter=doc_filter,
+                path_filter=path_filter,
+            )
+        hits = retrieve(
+            query=query,
+            query_vector=qvec,
+            rows=rows,
+            top_k=tk,
+            min_score=ms,
+            hybrid_alpha=alpha,
+            min_score_relative=min_score_relative,
+            decimals=decimals,
         )
-    hits = retrieve(
-        query=query,
-        query_vector=qvec,
-        rows=rows,
-        top_k=tk,
-        min_score=ms,
-        hybrid_alpha=alpha,
-        min_score_relative=min_score_relative,
-        decimals=decimals,
-    )
-    if exp:
-        hits = expand_neighbors(hits, rows, expand_neighbors=exp, query=query, decimals=decimals)
+        if backend == "sqlite-vec" and gen_id >= 0 and not vec_table_exists(conn):
+            # auto-heal: build vec then note fallback this round
+            rebuild_chunk_vec(
+                conn,
+                fingerprint=fingerprint,
+                generation_id=gen_id,
+                dimensions=dims,
+                vec_loaded=opened.vec_available,
+            )
+            conn.commit()
+            knn_meta = {"used": False, "healed_index": True}
+
+    # expand_neighbors needs full page neighborhood pool
+    if exp and hits:
+        if backend == "sqlite-vec":
+            # load all chunks for neighbor expansion on same docs
+            all_rows = load_chunk_rows(
+                conn,
+                fingerprint=fingerprint,
+                generation_id=gen_id,
+                doc_filter=None,
+                path_filter=None,
+            ) if gen_id >= 0 else rows
+            hits = expand_neighbors(
+                hits, all_rows, expand_neighbors=exp, query=query, decimals=decimals
+            )
+        else:
+            hits = expand_neighbors(
+                hits, rows, expand_neighbors=exp, query=query, decimals=decimals
+            )
     ctx_max = int(settings.get("context_max_chars") or 0)
-    # mismatch info
     other = conn.execute(
         "SELECT fingerprint, status, COUNT(*) AS n FROM index_generations GROUP BY fingerprint, status"
     ).fetchall()
@@ -1552,6 +1890,12 @@ def cmd_query(
             "min_score_relative": round_score(min_score_relative, decimals) if min_score_relative is not None else None,
             "hybrid_alpha": round_score(alpha, decimals),
             "score_metric": "hybrid_cosine_keyword",
+            "backend": backend,
+            "sqlite_vec": {
+                "available": opened.vec_available,
+                "detail": opened.vec_detail,
+                "knn": knn_meta,
+            },
             "expand_neighbors": exp,
             "candidate_count": len(rows),
             "hit_count": len(hits),
@@ -1577,6 +1921,10 @@ def cmd_stats(conn: sqlite3.Connection, opened: OpenResult) -> dict[str, Any]:
             "SELECT COUNT(*) AS n FROM chunks WHERE index_fingerprint=? AND generation_id=?",
             (fp, gen_id),
         ).fetchone()["n"]
+    try:
+        backend = resolve_vector_backend(settings, opened.vec_available)
+    except CliError:
+        backend = "error"
     return {
         "schema_version": "rag_sqlite.stats.v1",
         "ok": True,
@@ -1586,6 +1934,12 @@ def cmd_stats(conn: sqlite3.Connection, opened: OpenResult) -> dict[str, Any]:
         "chunks_for_active_generation": int(n_match),
         "index_fingerprint": fp,
         "active_generation_id": gen_id,
+        "vector_backend": backend,
+        "sqlite_vec": {
+            "available": opened.vec_available,
+            "detail": opened.vec_detail,
+            "table_ready": vec_table_exists(conn),
+        },
         "settings": {
             "embedding_provider": settings["embedding_provider"],
             "embedding_model": settings["embedding_model"],
@@ -1606,6 +1960,13 @@ def cmd_health(conn: sqlite3.Connection, opened: OpenResult) -> dict[str, Any]:
     model = effective_model(settings)
     fp = index_fingerprint(settings)
     gen_id = active_generation_id(conn, fp)
+    try:
+        backend = resolve_vector_backend(settings, opened.vec_available)
+    except CliError as exc:
+        backend = "error"
+        backend_err = str(exc)
+    else:
+        backend_err = None
     result: dict[str, Any] = {
         "schema_version": "rag_sqlite.health.v1",
         "ok": True,
@@ -1617,7 +1978,17 @@ def cmd_health(conn: sqlite3.Connection, opened: OpenResult) -> dict[str, Any]:
         "enabled": settings["enabled"],
         "index_fingerprint": fp,
         "active_generation_id": gen_id,
+        "vector_backend": backend,
+        "sqlite_vec": {
+            "available": opened.vec_available,
+            "detail": opened.vec_detail,
+            "table_ready": vec_table_exists(conn),
+            "importable": sqlite_vec_importable(),
+        },
     }
+    if backend_err:
+        result["status"] = "degraded"
+        result["warning"] = backend_err
     if not settings.get("enabled", True):
         result["status"] = "degraded"
         result["warning"] = "enabled=false"

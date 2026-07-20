@@ -445,3 +445,62 @@ class TestPlanFeatures(unittest.TestCase):
             code, payload = _run(db, "health")
             self.assertEqual(code, 0)
             self.assertEqual(payload["status"], "ready")
+
+
+class TestSqliteVec(unittest.TestCase):
+    def test_backend_auto_prefers_sqlite_vec_when_available(self):
+        if not rag.sqlite_vec_importable():
+            self.skipTest("sqlite-vec not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "t.sqlite"
+            _run(db, "config", "set", "embedding_provider", "hash")
+            _run(db, "config", "set", "vector_backend", "auto")
+            _run(db, "index", str(FIXTURES))
+            code, q = _run(db, "query", "data mesh", "--top-k", "2")
+            self.assertEqual(code, 0)
+            self.assertTrue(q["ok"])
+            self.assertEqual(q["meta"]["backend"], "sqlite-vec")
+            self.assertTrue(q["meta"]["sqlite_vec"]["available"])
+            self.assertTrue(q["meta"]["sqlite_vec"]["knn"]["used"])
+            self.assertGreaterEqual(q["meta"]["hit_count"], 1)
+            self.assertEqual(q["hits"][0]["filename"], "alpha.txt")
+
+    def test_backend_python_forces_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "t.sqlite"
+            _run(db, "config", "set", "embedding_provider", "hash")
+            _run(db, "config", "set", "vector_backend", "python")
+            _run(db, "index", str(FIXTURES))
+            code, q = _run(db, "query", "data mesh", "--top-k", "2")
+            self.assertEqual(code, 0)
+            self.assertEqual(q["meta"]["backend"], "python")
+            self.assertFalse(q["meta"]["sqlite_vec"]["knn"]["used"])
+
+    def test_reindex_force_rebuilds_vec(self):
+        if not rag.sqlite_vec_importable():
+            self.skipTest("sqlite-vec not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "t.sqlite"
+            _run(db, "config", "set", "embedding_provider", "hash")
+            _run(db, "index", str(FIXTURES / "alpha.txt"))
+            code, payload = _run(db, "reindex", "--force")
+            self.assertEqual(code, 0)
+            code_h, health = _run(db, "health")
+            self.assertEqual(code_h, 0)
+            self.assertTrue(health["sqlite_vec"]["available"])
+            self.assertTrue(health["sqlite_vec"]["table_ready"])
+
+    def test_strict_sqlite_vec_fails_closed_when_unavailable(self):
+        # Unit: forced backend with vec_loaded=False always fails closed.
+        with self.assertRaises(rag.CliError) as ctx:
+            rag.resolve_vector_backend({"vector_backend": "sqlite-vec"}, False)
+        self.assertEqual(ctx.exception.error_type, "SqliteVecUnavailable")
+        if not rag.sqlite_vec_importable():
+            with tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "t.sqlite"
+                _run(db, "config", "set", "embedding_provider", "hash")
+                _run(db, "config", "set", "vector_backend", "sqlite-vec")
+                _run(db, "index", str(FIXTURES / "alpha.txt"))
+                code_q, q = _run(db, "query", "x")
+                self.assertEqual(code_q, 1)
+                self.assertEqual(q["error"]["type"], "SqliteVecUnavailable")

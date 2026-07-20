@@ -29,6 +29,7 @@ Plano de implementação e histórico de aceite: [`PLAN.md`](./PLAN.md).
 - **Retrieval determinístico** com score híbrido cosine + keyword.
 - **Fingerprint + gerações** de índice (troca de modelo/URL exige `reindex --force`).
 - **Providers:** `hash` (offline/teste, lexical) e `ollama` (semântico, local ou remoto).
+- **Busca vetorial:** `sqlite-vec` (KNN nativo) quando instalado; fallback Python O(n) em `auto`.
 - **LLM-ready:** campo `context` marcado como conteúdo não confiável + comando `schema`.
 
 ## Quickstart
@@ -41,12 +42,24 @@ cd /home/elzobrito/desenvolvimento/rag-sqlite
 python rag_sqlite.py --version 2>/dev/null || python rag_sqlite.py schema | head -c 200
 ```
 
+### Instalação (opcional: sqlite-vec)
+
+```bash
+cd /home/elzobrito/desenvolvimento/rag-sqlite
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt   # instala sqlite-vec
+```
+
+Sem `sqlite-vec`, o backend `auto` usa scan cosine em Python (funcional, mais lento em corpora grandes).
+
 ### Offline (sem Ollama)
 
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set embedding_provider hash
 python rag_sqlite.py --db ./kb.sqlite index ./tests/fixtures
 python rag_sqlite.py --db ./kb.sqlite query "data mesh" --top-k 3 --min-score 0.1
+# meta.backend == "sqlite-vec" se a extensão carregou; senão "python"
 ```
 
 Sinal esperado: `ok: true`, `hit_count >= 1`, `filename` do primeiro hit
@@ -269,8 +282,20 @@ Tudo via `config set KEY VALUE` ou `config set-ollama`.
 | `max_file_bytes` | `2000000` | Tamanho máximo por arquivo |
 | `context_max_chars` | `50000` | Truncamento do `context` |
 | `health_probe_embed` | `false` | Probe opcional de `/api/embed` |
+| `vector_backend` | `auto` | `auto` \| `sqlite-vec` \| `python` |
+| `vec_candidate_multiplier` | `4` | KNN k = top_k × mult antes do hybrid re-rank |
 
 Lista completa: `python rag_sqlite.py --db ./kb.sqlite config list`.
+
+### Vector backends
+
+| Backend | Comportamento |
+|---------|----------------|
+| `auto` | Usa **sqlite-vec** se carregável; senão Python |
+| `sqlite-vec` | Exige extensão; fail-closed se ausente |
+| `python` | Full-scan cosine + keyword (stdlib only) |
+
+Query `meta.backend` e `meta.sqlite_vec.knn.used` expõem o caminho ativo.
 
 ## Security Notes
 

@@ -27,6 +27,7 @@ Para o caminho mais curto: [Primeiros passos](rag-sqlite-getting-started.md).
 10. [Agente descobre a API sozinho](#cenário-10--agente-descobre-a-api-sozinho)
 11. [Health ready / degraded / unhealthy](#cenário-11--health-ready--degraded--unhealthy)
 12. [Governança ESAA no mesmo workspace](#cenário-12--governança-esaa-no-mesmo-workspace)
+13. [Ativar sqlite-vec (KNN nativo)](#cenário-13--ativar-sqlite-vec-knn-nativo)
 
 ---
 
@@ -274,6 +275,35 @@ esaa --root /home/elzobrito/desenvolvimento/rag-sqlite --runner grok \
 
 **Armadilha:** `rag_sqlite.py` **não** substitui ESAA. Conversation ESAA
 (handoff) também não. Cada sistema tem domínio próprio.
+
+---
+
+## Cenário 13 — Ativar sqlite-vec (KNN nativo)
+
+**Situação:** corpus maior; full-scan Python fica lento.
+
+```bash
+cd /home/elzobrito/desenvolvimento/rag-sqlite
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+python rag_sqlite.py --db ./kb.sqlite config set vector_backend auto
+python rag_sqlite.py --db ./kb.sqlite reindex --force
+python rag_sqlite.py --db ./kb.sqlite query "data mesh" --top-k 5
+# meta.backend == "sqlite-vec" e meta.sqlite_vec.knn.used == true
+
+# Forçar só Python (debug / sem extensão)
+python rag_sqlite.py --db ./kb.sqlite config set vector_backend python
+
+# Exigir sqlite-vec (falha se não carregar)
+python rag_sqlite.py --db ./kb.sqlite config set vector_backend sqlite-vec
+```
+
+**Esperado:** `health.sqlite_vec.available` e `table_ready` após index/reindex.
+Hybrid continua com `hybrid_alpha`; KNN só escolhe candidatos.
+
+**Armadilha:** após instalar `sqlite-vec`, rode `reindex --force` (ou um `index`)
+para popular a virtual table `chunk_vec`.
 
 ---
 
