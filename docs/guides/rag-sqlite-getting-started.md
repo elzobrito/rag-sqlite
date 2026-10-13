@@ -64,7 +64,7 @@ Saída esperada do `set`: `ok: true`, `db_created: true` na primeira vez.
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma
+  --model embeddinggemma-2
 
 python rag_sqlite.py --db ./kb.sqlite health
 ```
@@ -74,7 +74,7 @@ python rag_sqlite.py --db ./kb.sqlite health
 
 ## 4. Indexar documentos
 
-Extensões default: `.txt`, `.md` (setting `index_extensions`).
+Extensões default: `.txt`, `.md` (setting `index_extensions`). Pastas chamadas `build`, `.git`, `__pycache__`, `.venv`, `node_modules` ou `.roadmap` ficam de fora (`exclude_dirs`). Um arquivo indicado pelo caminho completo é indexado mesmo assim.
 
 ```bash
 # fixtures de demo
@@ -101,6 +101,8 @@ python rag_sqlite.py --db ./kb.sqlite reindex --force
 ```bash
 python rag_sqlite.py --db ./kb.sqlite query "data mesh" --top-k 3 --min-score 0.1
 ```
+
+Sem flags extras, a query usa as settings gravadas. O default deduplica trechos iguais e quase iguais no `top_k` (`dedup_hits`, `dedup_max_jaccard`) e pode anexar o chunk vizinho do mesmo documento quando `expand_neighbors` for maior que zero. Isso não apaga documentos duplicados no SQLite.
 
 Use o campo **`context`** no prompt do LLM. Ele começa com:
 

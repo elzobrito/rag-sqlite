@@ -81,7 +81,7 @@ Atualização **atômica** de provider ollama + URL + model (+ timeout opcional)
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma \
+  --model embeddinggemma-2 \
   --timeout 120
 ```
 
@@ -111,6 +111,8 @@ python rag_sqlite.py --db ./kb.sqlite index ./docs --sync --prune
 | `--prune` | Com `--sync`, remove os missing (explícito) |
 
 Extensões: setting `index_extensions` (default `.txt,.md`).
+
+Ao indexar um **diretório**, qualquer componente pai do caminho relativo cujo nome esteja em `exclude_dirs` é ignorado. Default: `build,.git,__pycache__,.venv,node_modules,.roadmap`. Um arquivo passado diretamente é indexado mesmo dentro de um desses nomes. Esvaziar a setting (`config set exclude_dirs ""`) indexa a árvore inteira. `exclude_dirs` não entra no `index_fingerprint`.
 
 Schema: `rag_sqlite.index.v1` — `totals`, `results[]`, `index_fingerprint`,
 `generation_id`, `generation_activated`.
@@ -145,7 +147,9 @@ python rag_sqlite.py --db ./kb.sqlite query "data mesh" \
   --hybrid-alpha 0.7 \
   --expand-neighbors 1 \
   --doc alpha \
-  --path /home/elzobrito/desenvolvimento/rag-sqlite/tests
+  --path /home/elzobrito/desenvolvimento/rag-sqlite/tests \
+  --dedup-jaccard 0.65 \
+  --latest-run
 ```
 
 | Flag | Default | Descrição |
@@ -157,6 +161,11 @@ python rag_sqlite.py --db ./kb.sqlite query "data mesh" \
 | `--expand-neighbors` | setting | ±N chunks na mesma doc |
 | `--doc` | — | id ou substring de filename |
 | `--path` | — | filtro ILIKE em `source_path` |
+| `--dedup` / `--no-dedup` | setting `dedup_hits` | Liga ou desliga dedup só nesta execução |
+| `--dedup-jaccard` | setting `dedup_max_jaccard` | Teto de Jaccard; `1.0` desliga near-dedup |
+| `--latest-run` / `--all-runs` | setting `latest_run_only` | Só a run ISO mais recente, ou todas |
+
+`--dedup` e `--no-dedup` são mutuamente exclusivos, assim como `--latest-run` e `--all-runs`. Nenhuma dessas flags grava a setting. Com `dedup_hits`, o `top_k` guarda o primeiro hit de cada `text_hash` e descarta candidatos cujo Jaccard de tokens seja ≥ `dedup_max_jaccard`. O armazenamento não é deduplicado: dois arquivos iguais em pastas diferentes continuam sendo dois documentos. `meta` inclui `dedup_hits`, `dedup_max_jaccard` e `latest_run_only`.
 
 Schema: `rag_sqlite.query.v1` — `meta`, `hits[]`, `context`.
 
@@ -197,7 +206,7 @@ Não exige DB. Devolve JSON Schema de argumentos/saídas para tool-calling.
 |-----|------|---------|-------|
 | `enabled` | bool | true | Desliga embed |
 | `embedding_provider` | str | ollama | `ollama` \| `hash` |
-| `embedding_model` | str | embeddinggemma | Nome no Ollama |
+| `embedding_model` | str | embeddinggemma-2 | Nome no Ollama |
 | `base_url` | str | http://127.0.0.1:11434 | Sem path `/api/...` |
 | `chunk_size_chars` | int | 1200 | ≥ 100 |
 | `chunk_overlap_chars` | int | 200 | &lt; chunk_size |
@@ -206,7 +215,7 @@ Não exige DB. Devolve JSON Schema de argumentos/saídas para tool-calling.
 | `hybrid_alpha` | float | 0.7 | \[0,1\] |
 | `top_k` | int | 5 | Default query |
 | `min_score` | float | 0.0 | Piso |
-| `expand_neighbors` | int | 0 | Vizinhos |
+| `expand_neighbors` | int | 0 | ±N chunks do mesmo documento no resultado |
 | `score_decimals` | int | 6 | Arredondamento |
 | `index_extensions` | str | .txt,.md | CSV |
 | `allowed_hosts` | str | * | CSV hosts ou `*` |
@@ -218,7 +227,11 @@ Não exige DB. Devolve JSON Schema de argumentos/saídas para tool-calling.
 | `max_chunks_per_doc` | int | 500 | Cap de chunks |
 | `health_probe_embed` | bool | false | Probe `/api/embed` |
 | `vector_backend` | str | auto | `auto` \| `sqlite-vec` \| `python` |
-| `vec_candidate_multiplier` | int | 4 | KNN oversample antes do hybrid |
+| `vec_candidate_multiplier` | int | 4 | KNN oversample; com `dedup_hits` o mult efetivo é ≥ 10 |
+| `exclude_dirs` | str | build,.git,__pycache__,.venv,node_modules,.roadmap | Nomes de diretório pulados na varredura |
+| `dedup_hits` | bool | true | Dedup de `text_hash` no `top_k` |
+| `dedup_max_jaccard` | float | 0.65 | Jaccard máximo entre hits; `(0, 1]`; `1.0` desliga |
+| `latest_run_only` | bool | false | Só o diretório `YYYYMMDDTHHMMSSZ` mais recente de cada grupo |
 
 ## Exit codes
 

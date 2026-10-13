@@ -68,12 +68,12 @@ Sinal esperado: `ok: true`, `hit_count >= 1`, `filename` do primeiro hit
 ### Ollama local (semântico)
 
 Pré-requisito: daemon Ollama em `127.0.0.1:11434` com o modelo de embedding
-puxado (ex.: `ollama pull embeddinggemma`).
+puxado (ex.: `ollama pull embeddinggemma-2`).
 
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma
+  --model embeddinggemma-2
 
 python rag_sqlite.py --db ./kb.sqlite health
 python rag_sqlite.py --db ./kb.sqlite reindex --force
@@ -88,11 +88,26 @@ Após trocar provider/modelo/URL, o **fingerprint** muda: use `reindex --force`
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url https://ollama.exemplo.com \
-  --model embeddinggemma \
+  --model embeddinggemma-2 \
   --timeout 180
 
 python rag_sqlite.py --db ./kb.sqlite config list
 python rag_sqlite.py --db ./kb.sqlite health
+```
+
+### Micro-servidor local Hugging Face (`google/embeddinggemma-2`)
+
+Caso o Ollama no seu ambiente não suporte o modelo (ex.: erro de runtime MLX no Linux), utilize o micro-servidor embutido em [`scripts/hf_embed_server.py`](scripts/hf_embed_server.py), que emula os endpoints `/api/embed` e `/api/tags` via Python:
+
+```bash
+# 1. Terminal 1: Iniciar o servidor local (porta 11435)
+python scripts/hf_embed_server.py --port 11435 --model google/embeddinggemma-2
+
+# 2. Terminal 2: Apontar o rag-sqlite para o micro-servidor
+python rag_sqlite.py --db ./kb.sqlite config set base_url http://127.0.0.1:11435
+python rag_sqlite.py --db ./kb.sqlite config set embedding_model embeddinggemma-2
+python rag_sqlite.py --db ./kb.sqlite health
+python rag_sqlite.py --db ./kb.sqlite reindex --force
 ```
 
 Flags globais úteis:
@@ -198,6 +213,8 @@ hybrid = α * cosine + (1-α) * keyword
 - Provider `ollama`: α default **0.7** (settings `hybrid_alpha`).
 - Scores com 6 casas; ordem: hybrid ↓, cosine ↓, document_id ↑, chunk_index ↑, id ↑.
 
+**Proveniência no disco, deduplicação só na consulta.** Cada `source_path` mantém o próprio documento e os próprios chunks. `content_hash` só decide `unchanged` no mesmo caminho. `dedup_hits` remove `text_hash` idêntico do `top_k`; `dedup_max_jaccard` (default `0.65`) também suprime quase-duplicatas lexicais. `1.0` desliga o near-dedup. `exclude_dirs` pula nomes de diretório na varredura de pasta; um arquivo passado explicitamente entra mesmo assim. `latest_run_only` (default `false`) restringe candidatos ao diretório `YYYYMMDDTHHMMSSZ` mais recente de cada grupo. Essas settings não entram no fingerprint e não exigem reindex.
+
 **Fail-closed.** Path fora de `index_root`, host fora de `allowed_hosts`,
 dimensões incompatíveis, `NaN` em settings e DB inexistente em leitura
 produzem `rag_sqlite.error.v1` — não “sucesso vazio” enganoso.
@@ -270,7 +287,7 @@ Tudo via `config set KEY VALUE` ou `config set-ollama`.
 | Key | Default | Papel |
 |-----|---------|--------|
 | `embedding_provider` | `ollama` | `ollama` \| `hash` |
-| `embedding_model` | `embeddinggemma` | Modelo no servidor |
+| `embedding_model` | `embeddinggemma-2` | Modelo no servidor |
 | `base_url` | `http://127.0.0.1:11434` | Ollama local ou remoto |
 | `chunk_size_chars` | `1200` | Janela de chunk |
 | `chunk_overlap_chars` | `200` | Overlap |
@@ -283,7 +300,12 @@ Tudo via `config set KEY VALUE` ou `config set-ollama`.
 | `context_max_chars` | `50000` | Truncamento do `context` |
 | `health_probe_embed` | `false` | Probe opcional de `/api/embed` |
 | `vector_backend` | `auto` | `auto` \| `sqlite-vec` \| `python` |
-| `vec_candidate_multiplier` | `4` | KNN k = top_k × mult antes do hybrid re-rank |
+| `vec_candidate_multiplier` | `4` | KNN k = top_k × mult; com `dedup_hits` o mult efetivo é pelo menos 10 |
+| `exclude_dirs` | `build,.git,__pycache__,.venv,node_modules,.roadmap` | Nomes de diretório ignorados ao indexar uma pasta |
+| `dedup_hits` | `true` | Remove `text_hash` repetido do `top_k` |
+| `dedup_max_jaccard` | `0.65` | Teto de Jaccard de tokens entre hits; `(0, 1]`; `1.0` desliga |
+| `latest_run_only` | `false` | Se true, só a run ISO mais recente de cada grupo |
+| `expand_neighbors` | `0` | Inclui ±N chunks vizinhos do mesmo documento |
 
 Lista completa: `python rag_sqlite.py --db ./kb.sqlite config list`.
 
