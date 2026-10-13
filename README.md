@@ -95,6 +95,21 @@ python rag_sqlite.py --db ./kb.sqlite config list
 python rag_sqlite.py --db ./kb.sqlite health
 ```
 
+### Micro-servidor local Hugging Face (`google/embeddinggemma-2`)
+
+Caso o Ollama no seu ambiente não suporte o modelo (ex.: erro de runtime MLX no Linux), utilize o micro-servidor embutido em [`scripts/hf_embed_server.py`](scripts/hf_embed_server.py), que emula os endpoints `/api/embed` e `/api/tags` via Python:
+
+```bash
+# 1. Terminal 1: Iniciar o servidor local (porta 11435)
+python scripts/hf_embed_server.py --port 11435 --model google/embeddinggemma-2
+
+# 2. Terminal 2: Apontar o rag-sqlite para o micro-servidor
+python rag_sqlite.py --db ./kb.sqlite config set base_url http://127.0.0.1:11435
+python rag_sqlite.py --db ./kb.sqlite config set embedding_model embeddinggemma-2
+python rag_sqlite.py --db ./kb.sqlite health
+python rag_sqlite.py --db ./kb.sqlite reindex --force
+```
+
 Flags globais úteis:
 
 | Flag | Função |
