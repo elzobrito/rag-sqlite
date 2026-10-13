@@ -504,3 +504,15 @@ class TestSqliteVec(unittest.TestCase):
                 code_q, q = _run(db, "query", "x")
                 self.assertEqual(code_q, 1)
                 self.assertEqual(q["error"]["type"], "SqliteVecUnavailable")
+
+    def test_default_embedding_model_is_embeddinggemma_2(self):
+        self.assertEqual(rag.DEFAULT_SETTINGS["embedding_model"]["value"], "embeddinggemma-2")
+        self.assertEqual(rag.effective_model({"embedding_provider": "ollama"}), "embeddinggemma-2")
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "t.sqlite"
+            code_init, init_res = _run(db, "init")
+            self.assertEqual(code_init, 0)
+            code, cfg = _run(db, "config", "get", "embedding_model")
+            self.assertEqual(code, 0)
+            self.assertEqual(cfg["value"], "embeddinggemma-2")
+

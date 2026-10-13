@@ -64,7 +64,7 @@ Saída esperada do `set`: `ok: true`, `db_created: true` na primeira vez.
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma
+  --model embeddinggemma-2
 
 python rag_sqlite.py --db ./kb.sqlite health
 ```

@@ -81,7 +81,7 @@ Atualização **atômica** de provider ollama + URL + model (+ timeout opcional)
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma \
+  --model embeddinggemma-2 \
   --timeout 120
 ```
 
@@ -197,7 +197,7 @@ Não exige DB. Devolve JSON Schema de argumentos/saídas para tool-calling.
 |-----|------|---------|-------|
 | `enabled` | bool | true | Desliga embed |
 | `embedding_provider` | str | ollama | `ollama` \| `hash` |
-| `embedding_model` | str | embeddinggemma | Nome no Ollama |
+| `embedding_model` | str | embeddinggemma-2 | Nome no Ollama |
 | `base_url` | str | http://127.0.0.1:11434 | Sem path `/api/...` |
 | `chunk_size_chars` | int | 1200 | ≥ 100 |
 | `chunk_overlap_chars` | int | 200 | &lt; chunk_size |

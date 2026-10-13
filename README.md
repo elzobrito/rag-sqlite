@@ -68,12 +68,12 @@ Sinal esperado: `ok: true`, `hit_count >= 1`, `filename` do primeiro hit
 ### Ollama local (semântico)
 
 Pré-requisito: daemon Ollama em `127.0.0.1:11434` com o modelo de embedding
-puxado (ex.: `ollama pull embeddinggemma`).
+puxado (ex.: `ollama pull embeddinggemma-2`).
 
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma
+  --model embeddinggemma-2
 
 python rag_sqlite.py --db ./kb.sqlite health
 python rag_sqlite.py --db ./kb.sqlite reindex --force
@@ -88,7 +88,7 @@ Após trocar provider/modelo/URL, o **fingerprint** muda: use `reindex --force`
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url https://ollama.exemplo.com \
-  --model embeddinggemma \
+  --model embeddinggemma-2 \
   --timeout 180
 
 python rag_sqlite.py --db ./kb.sqlite config list
@@ -270,7 +270,7 @@ Tudo via `config set KEY VALUE` ou `config set-ollama`.
 | Key | Default | Papel |
 |-----|---------|--------|
 | `embedding_provider` | `ollama` | `ollama` \| `hash` |
-| `embedding_model` | `embeddinggemma` | Modelo no servidor |
+| `embedding_model` | `embeddinggemma-2` | Modelo no servidor |
 | `base_url` | `http://127.0.0.1:11434` | Ollama local ou remoto |
 | `chunk_size_chars` | `1200` | Janela de chunk |
 | `chunk_overlap_chars` | `200` | Overlap |

@@ -94,11 +94,11 @@ pode incluir hits fracos — passe os mesmos filtros da query.
 
 ```bash
 # daemon Ollama + modelo já baixado
-# ollama pull embeddinggemma
+# ollama pull embeddinggemma-2
 
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url http://127.0.0.1:11434 \
-  --model embeddinggemma
+  --model embeddinggemma-2
 
 python rag_sqlite.py --db ./kb.sqlite health
 python rag_sqlite.py --db ./kb.sqlite reindex --force
@@ -108,7 +108,7 @@ python rag_sqlite.py --db ./kb.sqlite query "data mesh" --min-score 0.4
 **Esperado:**
 
 - `index_fingerprint` **diferente** do modo hash
-- `dimensions: 768` (embeddinggemma típico)
+- `dimensions: 768` (embeddinggemma-2 típico)
 - `generation_id` novo, `generation_activated: true`
 - `hybrid_alpha: 0.7`, alpha na frente de beta por cosine+keyword
 
@@ -124,7 +124,7 @@ python rag_sqlite.py --db ./kb.sqlite query "data mesh" --min-score 0.4
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set-ollama \
   --url https://ollama.exemplo.com \
-  --model embeddinggemma \
+  --model embeddinggemma-2 \
   --timeout 180
 
 python rag_sqlite.py --db ./kb.sqlite config get base_url
@@ -142,7 +142,7 @@ SSL do Python stdlib — falha vira `OllamaConnectionError` / HTTP error em JSON
 
 ## Cenário 6 — Trocar modelo sem corromper o rank
 
-**Situação:** mudar de `embeddinggemma` para outro modelo no mesmo host.
+**Situação:** mudar de `embeddinggemma-2` para outro modelo no mesmo host.
 
 ```bash
 python rag_sqlite.py --db ./kb.sqlite config set embedding_model nomic-embed-text

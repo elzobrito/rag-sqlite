@@ -41,7 +41,7 @@ DEFAULT_DB_NAME = "rag.sqlite"
 DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
     "enabled": {"value": "true", "value_type": "bool", "description": "Enable embedding and retrieval"},
     "embedding_provider": {"value": "ollama", "value_type": "str", "description": "Embedding provider: ollama | hash"},
-    "embedding_model": {"value": "embeddinggemma", "value_type": "str", "description": "Embedding model name"},
+    "embedding_model": {"value": "embeddinggemma-2", "value_type": "str", "description": "Embedding model name"},
     "base_url": {"value": "http://127.0.0.1:11434", "value_type": "str", "description": "Ollama base URL (local or remote)"},
     "chunk_size_chars": {"value": "1200", "value_type": "int", "description": "Max characters per chunk"},
     "chunk_overlap_chars": {"value": "200", "value_type": "int", "description": "Overlap characters between chunks"},
@@ -622,7 +622,7 @@ def effective_model(settings: dict[str, Any]) -> str:
     provider = str(settings["embedding_provider"]).strip().lower()
     if provider == "hash":
         return "hash-32"
-    return str(settings["embedding_model"]).strip() or "embeddinggemma"
+    return str(settings.get("embedding_model", "")).strip() or "embeddinggemma-2"
 
 
 def index_fingerprint(settings: dict[str, Any]) -> str:
