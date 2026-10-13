@@ -516,3 +516,27 @@ class TestSqliteVec(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(cfg["value"], "embeddinggemma-2")
 
+    def test_index_progress_feedback_in_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "t.sqlite"
+            _run(db, "config", "set", "embedding_provider", "hash")
+            # Executa sem --compact e sem --quiet para validar progresso no stderr
+            cmd = [sys.executable, str(SCRIPT), "--db", str(db), "index", str(FIXTURES)]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0)
+            payload = json.loads(proc.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertIn("[index] Iniciando indexação", proc.stderr)
+            self.assertIn("[index] Concluído:", proc.stderr)
+
+    def test_index_quiet_suppresses_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "t.sqlite"
+            _run(db, "config", "set", "embedding_provider", "hash")
+            cmd = [sys.executable, str(SCRIPT), "--db", str(db), "index", str(FIXTURES), "--quiet"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0)
+            payload = json.loads(proc.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertNotIn("[index]", proc.stderr)
+

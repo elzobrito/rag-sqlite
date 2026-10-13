@@ -1506,6 +1506,7 @@ def _index_paths(
     *,
     force: bool,
     notes: str,
+    progress: bool = True,
 ) -> dict[str, Any]:
     settings = load_settings(conn)
     embed_fn, provider, model = make_embedder(settings)
@@ -1520,8 +1521,16 @@ def _index_paths(
     else:
         gen_id = active
         new_generation = False
+
+    total = len(paths)
+    if progress and total > 0:
+        print(f"[index] Iniciando indexação de {total} arquivo(s)...", file=sys.stderr, flush=True)
+
     results = []
-    for f in paths:
+    for i, f in enumerate(paths, 1):
+        pct = (i / total) * 100
+        if progress:
+            print(f"[index] [{i}/{total}] ({pct:5.1f}%) {f.name}...", file=sys.stderr, end="", flush=True)
         try:
             conn.execute("SAVEPOINT sp_file")
             result = index_file(
@@ -1537,11 +1546,30 @@ def _index_paths(
             )
             conn.execute("RELEASE SAVEPOINT sp_file")
             results.append(result)
+            if progress:
+                status = result.get("status", "ok")
+                chunks = result.get("chunks", 0)
+                print(f" -> {status} ({chunks} chunks)", file=sys.stderr, flush=True)
         except Exception as exc:  # noqa: BLE001
             conn.execute("ROLLBACK TO SAVEPOINT sp_file")
             conn.execute("RELEASE SAVEPOINT sp_file")
-            results.append({"path": str(f), "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            err_msg = f"{type(exc).__name__}: {exc}"
+            results.append({"path": str(f), "status": "error", "error": err_msg})
+            if progress:
+                print(f" -> ERRO: {err_msg}", file=sys.stderr, flush=True)
+
     ok_count = sum(1 for r in results if r.get("status") in {"indexed", "unchanged", "empty"})
+    indexed_count = sum(1 for r in results if r.get("status") == "indexed")
+    unchanged_count = sum(1 for r in results if r.get("status") == "unchanged")
+    err_count = sum(1 for r in results if r.get("status") == "error")
+
+    if progress and total > 0:
+        print(
+            f"[index] Concluído: {total} arquivos ({indexed_count} novos/atualizados, {unchanged_count} inalterados, {err_count} erros).",
+            file=sys.stderr,
+            flush=True,
+        )
+
     if new_generation:
         if ok_count == 0 and results:
             conn.execute("UPDATE index_generations SET status='abandoned' WHERE id=?", (gen_id,))
@@ -1600,11 +1628,12 @@ def cmd_index(
     force: bool = False,
     sync: bool = False,
     prune: bool = False,
+    progress: bool = True,
 ) -> dict[str, Any]:
     settings = load_settings(conn)
     exts = parse_extensions(str(settings.get("index_extensions", ".txt,.md")))
     files = list_index_paths(Path(path), exts, settings)
-    payload = _index_paths(conn, opened, files, force=force, notes=f"index {path}")
+    payload = _index_paths(conn, opened, files, force=force, notes=f"index {path}", progress=progress)
     payload["schema_version"] = "rag_sqlite.index.v1"
     if sync or prune:
         present = {str(f.resolve()) for f in files}
@@ -1645,10 +1674,16 @@ def cmd_index(
     return payload
 
 
-def cmd_reindex(conn: sqlite3.Connection, opened: OpenResult, *, force: bool = False) -> dict[str, Any]:
+def cmd_reindex(
+    conn: sqlite3.Connection,
+    opened: OpenResult,
+    *,
+    force: bool = False,
+    progress: bool = True,
+) -> dict[str, Any]:
     docs = conn.execute("SELECT source_path FROM documents ORDER BY id").fetchall()
     paths = [Path(d["source_path"]) for d in docs]
-    payload = _index_paths(conn, opened, paths, force=force, notes="reindex")
+    payload = _index_paths(conn, opened, paths, force=force, notes="reindex", progress=progress)
     payload["schema_version"] = "rag_sqlite.reindex.v1"
     return payload
 
@@ -2228,9 +2263,11 @@ def build_parser() -> argparse.ArgumentParser:
     idx.add_argument("--force", action="store_true")
     idx.add_argument("--sync", action="store_true")
     idx.add_argument("--prune", action="store_true")
+    idx.add_argument("--quiet", action="store_true", help="Omit real-time progress on stderr")
 
     ri = sub.add_parser("reindex")
     ri.add_argument("--force", action="store_true")
+    ri.add_argument("--quiet", action="store_true", help="Omit real-time progress on stderr")
 
     docs = sub.add_parser("docs")
     docs_sub = docs.add_subparsers(dest="docs_cmd", required=True)
@@ -2283,13 +2320,23 @@ def dispatch(args: argparse.Namespace, opened: OpenResult) -> tuple[dict[str, An
         if args.config_cmd == "set-ollama":
             return cmd_config_set_ollama(conn, opened, url=args.url, model=args.model, timeout=args.timeout), 0
     if cmd == "index":
-        payload = cmd_index(conn, opened, args.path, force=args.force, sync=args.sync, prune=args.prune)
+        quiet = bool(getattr(args, "quiet", False) or getattr(args, "compact", False))
+        payload = cmd_index(
+            conn, opened, args.path,
+            force=args.force, sync=args.sync, prune=args.prune,
+            progress=not quiet,
+        )
         code = 0 if payload.get("ok") else 1
         if payload.get("ok") and payload.get("totals", {}).get("files", 0) == 0:
             code = 2
         return payload, code
     if cmd == "reindex":
-        payload = cmd_reindex(conn, opened, force=args.force)
+        quiet = bool(getattr(args, "quiet", False) or getattr(args, "compact", False))
+        payload = cmd_reindex(
+            conn, opened,
+            force=args.force,
+            progress=not quiet,
+        )
         return payload, 0 if payload.get("ok") else 1
     if cmd == "docs":
         if args.docs_cmd == "list":
