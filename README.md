@@ -213,6 +213,8 @@ hybrid = α * cosine + (1-α) * keyword
 - Provider `ollama`: α default **0.7** (settings `hybrid_alpha`).
 - Scores com 6 casas; ordem: hybrid ↓, cosine ↓, document_id ↑, chunk_index ↑, id ↑.
 
+**Proveniência no disco, deduplicação só na consulta.** Cada `source_path` mantém o próprio documento e os próprios chunks. `content_hash` só decide `unchanged` no mesmo caminho. `dedup_hits` remove `text_hash` idêntico do `top_k`; `dedup_max_jaccard` (default `0.65`) também suprime quase-duplicatas lexicais. `1.0` desliga o near-dedup. `exclude_dirs` pula nomes de diretório na varredura de pasta; um arquivo passado explicitamente entra mesmo assim. `latest_run_only` (default `false`) restringe candidatos ao diretório `YYYYMMDDTHHMMSSZ` mais recente de cada grupo. Essas settings não entram no fingerprint e não exigem reindex.
+
 **Fail-closed.** Path fora de `index_root`, host fora de `allowed_hosts`,
 dimensões incompatíveis, `NaN` em settings e DB inexistente em leitura
 produzem `rag_sqlite.error.v1` — não “sucesso vazio” enganoso.
@@ -298,7 +300,12 @@ Tudo via `config set KEY VALUE` ou `config set-ollama`.
 | `context_max_chars` | `50000` | Truncamento do `context` |
 | `health_probe_embed` | `false` | Probe opcional de `/api/embed` |
 | `vector_backend` | `auto` | `auto` \| `sqlite-vec` \| `python` |
-| `vec_candidate_multiplier` | `4` | KNN k = top_k × mult antes do hybrid re-rank |
+| `vec_candidate_multiplier` | `4` | KNN k = top_k × mult; com `dedup_hits` o mult efetivo é pelo menos 10 |
+| `exclude_dirs` | `build,.git,__pycache__,.venv,node_modules,.roadmap` | Nomes de diretório ignorados ao indexar uma pasta |
+| `dedup_hits` | `true` | Remove `text_hash` repetido do `top_k` |
+| `dedup_max_jaccard` | `0.65` | Teto de Jaccard de tokens entre hits; `(0, 1]`; `1.0` desliga |
+| `latest_run_only` | `false` | Se true, só a run ISO mais recente de cada grupo |
+| `expand_neighbors` | `0` | Inclui ±N chunks vizinhos do mesmo documento |
 
 Lista completa: `python rag_sqlite.py --db ./kb.sqlite config list`.
 

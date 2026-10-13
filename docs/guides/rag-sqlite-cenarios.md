@@ -307,13 +307,39 @@ para popular a virtual table `chunk_vec`.
 
 ---
 
+## Cenário 14 — Variantes de aula e diretórios de build
+
+**Situação:** o mesmo texto aparece em `materiais/` e em `build/materiais/`, ou em várias runs `YYYYMMDDTHHMMSSZ`, e o `top_k` enche com o mesmo trecho.
+
+```bash
+python rag_sqlite.py --db ./kb.sqlite config set exclude_dirs "build,.git,__pycache__,.venv,node_modules,.roadmap"
+python rag_sqlite.py --db ./kb.sqlite index ./corpus
+# build/ não entra. Um arquivo explícito entra:
+# python rag_sqlite.py --db ./kb.sqlite index ./corpus/build/materiais/aula.md
+
+python rag_sqlite.py --db ./kb.sqlite query "cinco perspectivas de Garvin e custos da qualidade" --top-k 5
+# meta.dedup_hits == true e meta.dedup_max_jaccard == 0.65
+# o top_k não repete text_hash nem quase-duplicata lexical
+
+python rag_sqlite.py --db ./kb.sqlite query "…" --dedup-jaccard 1.0
+python rag_sqlite.py --db ./kb.sqlite query "…" --no-dedup
+python rag_sqlite.py --db ./kb.sqlite query "…" --latest-run
+```
+
+**Esperado:** `docs list` continua com um registro por `source_path`. A deduplicação só muda os hits. `stats.index_fingerprint` não muda ao gravar essas settings.
+
+**Armadilha:** Jaccard compara o chunk inteiro. Um preâmbulo longo pode deixar duas redações do mesmo bloco abaixo de 0,65. `expand_neighbors` traz o chunk seguinte do mesmo documento quando a janela cortou o assunto no meio.
+
+---
+
 ## Referência rápida comando → cenário
 
 | Comando | Cenários |
 |---------|----------|
 | `config set` / `set-ollama` | 1, 4, 5, 6, 8 |
 | `index` / `reindex` | 1, 4, 6, 7, 9 |
-| `query` / `export-context` | 1, 2, 3, 4 |
+| `query` / `export-context` | 1, 2, 3, 4, 14 |
+| `index` com `exclude_dirs` | 14 |
 | `health` / `stats` | 4, 11 |
 | `schema` | 10 |
 | `esaa *` | 12 |

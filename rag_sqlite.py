@@ -71,7 +71,29 @@ DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
         "value_type": "int",
         "description": "When using sqlite-vec, fetch k*multiplier candidates before hybrid re-rank",
     },
+    "exclude_dirs": {
+        "value": "build,.git,__pycache__,.venv,node_modules,.roadmap",
+        "value_type": "str",
+        "description": "Comma-separated directory names to skip when indexing directories",
+    },
+    "dedup_hits": {
+        "value": "true",
+        "value_type": "bool",
+        "description": "Deduplicate identical chunk text_hash in query top_k results",
+    },
+    "dedup_max_jaccard": {
+        "value": "0.65",
+        "value_type": "float",
+        "description": "Max token Jaccard similarity (0..1) allowed between top_k hits when dedup_hits=true (1.0 disables near-dedup)",
+    },
+    "latest_run_only": {
+        "value": "false",
+        "value_type": "bool",
+        "description": "If true, filter candidates to the latest ISO timestamp directory per artifact group",
+    },
 }
+
+_RUN_TS_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 
 class CliError(Exception):
@@ -196,6 +218,14 @@ def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(normalize_for_tokens(text))
 
 
+def token_jaccard(tokens_a: set[str], tokens_b: set[str]) -> float:
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / float(len(tokens_a | tokens_b))
+
+
 def keyword_score(query: str, document_text: str, decimals: int = SCORE_DECIMALS) -> float:
     q_tokens = tokenize(query)
     if not q_tokens:
@@ -224,6 +254,8 @@ def retrieve(
     hybrid_alpha: float = 1.0,
     min_score_relative: float | None = None,
     decimals: int = SCORE_DECIMALS,
+    dedup_hits: bool = False,
+    dedup_max_jaccard: float = 0.65,
 ) -> list[dict[str, Any]]:
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
@@ -251,9 +283,51 @@ def retrieve(
         threshold = round_score(top * min_score_relative, decimals)
         scored = [t for t in scored if t[0] >= threshold]
     hits: list[dict[str, Any]] = []
-    for rank, (score, cos, kw, _d, _c, _i, row) in enumerate(scored[:top_k], start=1):
-        hits.append(_hit_from_row(row, rank=rank, score=score, cosine=cos, keyword=kw))
+    seen_hashes: set[str] = set()
+    accepted_token_sets: list[set[str]] = []
+    for score, cos, kw, _d, _c, _i, row in scored:
+        if len(hits) >= top_k:
+            break
+        if dedup_hits:
+            text_hash = row.get("text_hash") or sha256_text(row.get("chunk_text") or "")
+            if text_hash in seen_hashes:
+                continue
+            cand_tokens = set(tokenize(row.get("chunk_text") or ""))
+            if dedup_max_jaccard < 1.0 and cand_tokens:
+                if any(
+                    token_jaccard(cand_tokens, prev) >= dedup_max_jaccard
+                    for prev in accepted_token_sets
+                ):
+                    continue
+            seen_hashes.add(text_hash)
+            accepted_token_sets.append(cand_tokens)
+        hits.append(_hit_from_row(row, rank=len(hits) + 1, score=score, cosine=cos, keyword=kw))
     return hits
+
+
+def filter_latest_run_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep rows from the newest ISO run directory in each artifact group."""
+    located: list[tuple[dict[str, Any], tuple[str, ...] | None, str | None]] = []
+    max_ts: dict[tuple[str, ...], str] = {}
+    for row in rows:
+        parts = Path(str(row.get("source_path") or "")).parts
+        parent: tuple[str, ...] | None = None
+        ts_part: str | None = None
+        for idx, part in enumerate(parts[:-1]):
+            if _RUN_TS_RE.fullmatch(part):
+                parent = parts[:idx]
+                ts_part = part
+                break
+        located.append((row, parent, ts_part))
+        if parent is not None and ts_part is not None:
+            current = max_ts.get(parent)
+            if current is None or ts_part > current:
+                max_ts[parent] = ts_part
+    kept: list[dict[str, Any]] = []
+    for row, parent, ts_part in located:
+        if parent is None or ts_part == max_ts.get(parent):
+            kept.append(row)
+    return kept
 
 
 def expand_neighbors(
@@ -321,6 +395,7 @@ def _hit_from_row(
         "document_id": int(row["document_id"]),
         "chunk_index": int(row["chunk_index"]),
         "chunk_text": row.get("chunk_text") or "",
+        "text_hash": row.get("text_hash") or sha256_text(row.get("chunk_text") or ""),
         "provider": row.get("provider"),
         "model": row.get("model"),
         "dimensions": row.get("dimensions"),
@@ -512,7 +587,7 @@ def load_chunk_rows_by_ids(
         return []
     placeholders = ",".join("?" for _ in ids)
     sql = f"""
-        SELECT c.id, c.document_id, c.chunk_index, c.chunk_text, c.provider, c.model,
+        SELECT c.id, c.document_id, c.chunk_index, c.chunk_text, c.text_hash, c.provider, c.model,
                c.dimensions, c.embedding_json, c.embedding_blob, c.index_fingerprint, c.generation_id,
                d.filename, d.source_path
         FROM chunks c
@@ -521,11 +596,13 @@ def load_chunk_rows_by_ids(
     """
     by_id: dict[int, dict[str, Any]] = {}
     for r in conn.execute(sql, list(ids)):
+        chunk_text = r["chunk_text"] or ""
         by_id[int(r["id"])] = {
             "id": int(r["id"]),
             "document_id": int(r["document_id"]),
             "chunk_index": int(r["chunk_index"]),
-            "chunk_text": r["chunk_text"] or "",
+            "chunk_text": chunk_text,
+            "text_hash": r["text_hash"] or sha256_text(chunk_text),
             "provider": r["provider"],
             "model": r["model"],
             "dimensions": int(r["dimensions"]),
@@ -984,6 +1061,13 @@ def validate_setting(key: str, value: Any) -> None:
             )
     if key == "vec_candidate_multiplier" and int(value) < 1:
         raise CliError("vec_candidate_multiplier must be >= 1", error_type="ConfigError")
+    if key == "dedup_max_jaccard":
+        score = float(value)
+        if not math.isfinite(score) or score <= 0.0 or score > 1.0:
+            raise CliError(
+                "dedup_max_jaccard must be a finite number in (0, 1]",
+                error_type="ConfigError",
+            )
 
 
 def prepare_setting(conn: sqlite3.Connection, key: str, raw_value: str) -> tuple[str, Any, str, str]:
@@ -1122,17 +1206,30 @@ def active_generation_id(conn: sqlite3.Connection, fingerprint: str) -> int | No
 # ---------------------------------------------------------------------------
 
 
+def parse_exclude_dirs(raw: str) -> set[str]:
+    names: set[str] = set()
+    for part in (raw or "").split(","):
+        name = part.strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def list_index_paths(path: Path, extensions: set[str], settings: dict[str, Any]) -> list[Path]:
     path = resolve_index_path(path, settings)
     if not path.exists():
         raise CliError(f"path not found: {path}", error_type="PathError")
     if path.is_file():
         return [path]
+    excluded = parse_exclude_dirs(str(settings.get("exclude_dirs", "")))
     files: list[Path] = []
     for p in sorted(path.rglob("*")):
         if not p.is_file():
             continue
         if p.suffix.lower() not in extensions:
+            continue
+        rel_parts = p.relative_to(path).parts[:-1]
+        if any(part in excluded for part in rel_parts):
             continue
         try:
             files.append(resolve_index_path(p, settings))
@@ -1325,7 +1422,7 @@ def load_chunk_rows(
     path_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     sql = """
-        SELECT c.id, c.document_id, c.chunk_index, c.chunk_text, c.provider, c.model,
+        SELECT c.id, c.document_id, c.chunk_index, c.chunk_text, c.text_hash, c.provider, c.model,
                c.dimensions, c.embedding_json, c.embedding_blob, c.index_fingerprint, c.generation_id,
                d.filename, d.source_path
         FROM chunks c
@@ -1346,12 +1443,14 @@ def load_chunk_rows(
     sql += " ORDER BY c.document_id ASC, c.chunk_index ASC, c.id ASC"
     rows: list[dict[str, Any]] = []
     for r in conn.execute(sql, params):
+        chunk_text = r["chunk_text"] or ""
         rows.append(
             {
                 "id": int(r["id"]),
                 "document_id": int(r["document_id"]),
                 "chunk_index": int(r["chunk_index"]),
-                "chunk_text": r["chunk_text"] or "",
+                "chunk_text": chunk_text,
+                "text_hash": r["text_hash"] or sha256_text(chunk_text),
                 "provider": r["provider"],
                 "model": r["model"],
                 "dimensions": int(r["dimensions"]),
@@ -1757,11 +1856,31 @@ def cmd_query(
     expand_n: int | None = None,
     doc_filter: str | None = None,
     path_filter: str | None = None,
+    dedup_hits: bool | None = None,
+    dedup_max_jaccard: float | None = None,
+    latest_run: bool | None = None,
 ) -> dict[str, Any]:
     query = (query or "").strip()
     if not query:
         raise CliError("query must be non-empty", error_type="ValueError")
     settings = load_settings(conn)
+    if dedup_hits is None:
+        dedup = bool(settings.get("dedup_hits", False))
+    else:
+        dedup = bool(dedup_hits)
+    if dedup_max_jaccard is None:
+        jaccard_max = float(settings.get("dedup_max_jaccard", 0.65))
+    else:
+        jaccard_max = float(dedup_max_jaccard)
+    if not math.isfinite(jaccard_max) or jaccard_max <= 0.0 or jaccard_max > 1.0:
+        raise CliError(
+            "dedup_max_jaccard must be a finite number in (0, 1]",
+            error_type="ConfigError",
+        )
+    if latest_run is None:
+        latest = bool(settings.get("latest_run_only", False))
+    else:
+        latest = bool(latest_run)
     embed_fn, provider, model = make_embedder(settings)
     fingerprint = index_fingerprint(settings)
     gen_id = active_generation_id(conn, fingerprint)
@@ -1793,7 +1912,10 @@ def cmd_query(
 
     if gen_id >= 0 and backend == "sqlite-vec" and vec_table_exists(conn):
         mult = max(1, int(settings.get("vec_candidate_multiplier") or 4))
-        knn_k = max(tk, min(tk * mult, max_top * mult, 200))
+        if dedup:
+            mult = max(mult, 10)
+        pool = max(tk, 1) * mult if dedup else max(tk, tk * mult)
+        knn_k = max(tk, min(pool, max_top * mult, 200))
         # Ensure dims match stored vec index
         stored_dims = _meta_get(conn, "chunk_vec_dims")
         if stored_dims and int(stored_dims) != dims:
@@ -1838,6 +1960,8 @@ def cmd_query(
                 if not r.get("embedding"):
                     # reconstruct unit vector not available; keep stored
                     pass
+            if latest:
+                rows = filter_latest_run_rows(rows)
             hits = retrieve(
                 query=query,
                 query_vector=qvec,
@@ -1847,6 +1971,8 @@ def cmd_query(
                 hybrid_alpha=alpha,
                 min_score_relative=min_score_relative,
                 decimals=decimals,
+                dedup_hits=dedup,
+                dedup_max_jaccard=jaccard_max,
             )
             # Prefer sqlite-vec cosine when hybrid needs it and embedding missing edge cases
             for h in hits:
@@ -1865,6 +1991,8 @@ def cmd_query(
                 doc_filter=doc_filter,
                 path_filter=path_filter,
             )
+        if latest:
+            rows = filter_latest_run_rows(rows)
         hits = retrieve(
             query=query,
             query_vector=qvec,
@@ -1874,6 +2002,8 @@ def cmd_query(
             hybrid_alpha=alpha,
             min_score_relative=min_score_relative,
             decimals=decimals,
+            dedup_hits=dedup,
+            dedup_max_jaccard=jaccard_max,
         )
         if backend == "sqlite-vec" and gen_id >= 0 and not vec_table_exists(conn):
             # auto-heal: build vec then note fallback this round
@@ -1932,6 +2062,9 @@ def cmd_query(
                 "knn": knn_meta,
             },
             "expand_neighbors": exp,
+            "dedup_hits": dedup,
+            "dedup_max_jaccard": jaccard_max,
+            "latest_run_only": latest,
             "candidate_count": len(rows),
             "hit_count": len(hits),
             "deterministic": True,
@@ -1984,6 +2117,10 @@ def cmd_stats(conn: sqlite3.Connection, opened: OpenResult) -> dict[str, Any]:
             "enabled": settings["enabled"],
             "index_root": settings.get("index_root"),
             "allowed_hosts": settings.get("allowed_hosts"),
+            "exclude_dirs": settings.get("exclude_dirs"),
+            "dedup_hits": settings.get("dedup_hits"),
+            "dedup_max_jaccard": settings.get("dedup_max_jaccard"),
+            "latest_run_only": settings.get("latest_run_only"),
         },
         "schema_db_version": SCHEMA_VERSION,
     }
@@ -2093,6 +2230,9 @@ def _json_schema_for_command(name: str) -> dict[str, Any]:
                     "expand_neighbors": {"type": "integer", "minimum": 0},
                     "doc": {"type": "string"},
                     "path": {"type": "string"},
+                    "dedup_hits": {"type": "boolean"},
+                    "dedup_max_jaccard": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+                    "latest_run_only": {"type": "boolean"},
                 },
             },
             "output": {
@@ -2284,6 +2424,13 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--expand-neighbors", type=int, default=None)
     q.add_argument("--doc", default=None)
     q.add_argument("--path", default=None, dest="path_filter")
+    q_dedup = q.add_mutually_exclusive_group()
+    q_dedup.add_argument("--dedup", dest="dedup_hits", action="store_true", default=None)
+    q_dedup.add_argument("--no-dedup", dest="dedup_hits", action="store_false", default=None)
+    q.add_argument("--dedup-jaccard", dest="dedup_max_jaccard", type=float, default=None)
+    q_runs = q.add_mutually_exclusive_group()
+    q_runs.add_argument("--latest-run", dest="latest_run_only", action="store_true", default=None)
+    q_runs.add_argument("--all-runs", dest="latest_run_only", action="store_false", default=None)
 
     sub.add_parser("stats")
     sub.add_parser("health")
@@ -2298,6 +2445,13 @@ def build_parser() -> argparse.ArgumentParser:
     ec.add_argument("--expand-neighbors", type=int, default=None)
     ec.add_argument("--doc", default=None)
     ec.add_argument("--path", default=None, dest="path_filter")
+    ec_dedup = ec.add_mutually_exclusive_group()
+    ec_dedup.add_argument("--dedup", dest="dedup_hits", action="store_true", default=None)
+    ec_dedup.add_argument("--no-dedup", dest="dedup_hits", action="store_false", default=None)
+    ec.add_argument("--dedup-jaccard", dest="dedup_max_jaccard", type=float, default=None)
+    ec_runs = ec.add_mutually_exclusive_group()
+    ec_runs.add_argument("--latest-run", dest="latest_run_only", action="store_true", default=None)
+    ec_runs.add_argument("--all-runs", dest="latest_run_only", action="store_false", default=None)
     return p
 
 
@@ -2351,6 +2505,9 @@ def dispatch(args: argparse.Namespace, opened: OpenResult) -> tuple[dict[str, An
             top_k=args.top_k, min_score=args.min_score, min_score_relative=args.min_score_relative,
             hybrid_alpha=args.hybrid_alpha, expand_n=args.expand_neighbors,
             doc_filter=args.doc, path_filter=args.path_filter,
+            dedup_hits=args.dedup_hits,
+            dedup_max_jaccard=args.dedup_max_jaccard,
+            latest_run=args.latest_run_only,
         )
         return payload, 0
     if cmd == "export-context":
@@ -2359,6 +2516,9 @@ def dispatch(args: argparse.Namespace, opened: OpenResult) -> tuple[dict[str, An
             top_k=args.top_k, min_score=args.min_score, min_score_relative=args.min_score_relative,
             hybrid_alpha=args.hybrid_alpha, expand_n=args.expand_neighbors,
             doc_filter=args.doc, path_filter=args.path_filter,
+            dedup_hits=args.dedup_hits,
+            dedup_max_jaccard=args.dedup_max_jaccard,
+            latest_run=args.latest_run_only,
         )
         return payload, 0
     if cmd == "stats":
